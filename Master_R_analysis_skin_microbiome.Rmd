@@ -1,0 +1,736 @@
+**Master analysis for skin microbiome project**
+========================================================
+
+```{r,echo=FALSE}
+#Define file paths to data files
+setwd("~/Documents/UTS/skin_microbiome/Samples/Westmead/data/run4/UPARSE2/")
+#Show boxplots of distances between diabetic skin types and wounds, and do significance testing. Beta-diversity was calculated in Qiime on a 30K rarefied OTU table using unifrac, and the make_distance_boxplots.py command to compare distnaces between groups.
+dist<-read.csv("distances_contra_adj_v_wounds2.csv", header=TRUE)
+```
+Generate boxplots based on weighted unifrac distances between diabetic adjacent and contrateral skin, and wound swabs and debridement
+```{r, echo=FALSE, fig.width=10, fig.height=5}
+boxplot(dist, las=2, main="Unifrac distances between adjacent or contralateral\n diabetic skin and wounds", ylab="Weighted unifrac distance", cex.lab=0.75, cex.main=0.75, cex.axis=0.75, ylim=c(0,1))
+```
+Test for significant differences between groups
+```{r, echo=FALSE}
+ks.test(dist$adj_V_ws, dist$con_V_ws)
+ks.test(dist$adj_V_wd, dist$con_V_wd)
+ks.test(dist$adj_V_wd, dist$adj_V_ws)
+ks.test(dist$con_V_wd, dist$con_V_ws)
+```
+This shows that adjacent diabetic skin is (slightly) more similar to wounds than adjacent diabetic skin, and this difference is significantly different. This justifies the removal of the adjacent diabetic skin samples from the analysis.
+
+Analysis of richness from rarefied OTU table
+```{r, echo=FALSE}
+#define paths to files
+biom=("r_data/diabetes_all_uparse_tax_goodalign_json.biom")
+map=("r_data/mapping_diabetes_all_uparse.txt")
+tree=("r_data/otus_cf_aligned.tre")
+#import data
+library("phyloseq")
+dswd <- import_qiime_sample_data(map)
+biom_otu_table<- import_biom(biom, tree)
+mydata <- merge_phyloseq(biom_otu_table,dswd)
+colnames(tax_table(mydata)) = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+library("ggplot2")
+theme_set(theme_bw())
+#Subset data to exclude positive, negative 
+mydata_sub<-subset_samples(mydata, sampletype1%in%c("diabetic_skin","control_skin","wound"))
+#Subset again to remove diabetic_skin_adj
+mydata_sub<-subset_samples(mydata_sub, sampletype2!="diabetic_skin_adj")
+#subset again to remove P3 and P4
+mydata_sub<-subset_samples(mydata_sub, !(subject%in%c("P3","P4")))
+#Remove samples with less than 30K reads
+mydata_sub<-prune_samples(names(which(sample_sums(mydata_sub) >= 30000)), mydata_sub)
+#rarefy otu table to 30K reads
+rare_mydata_sub<-rarefy_even_depth(mydata_sub, sample.size=30000, trimOTUs=TRUE, rngseed=552)
+```
+```{r, echo=FALSE, fig.width=10, fig.height=4}
+plot_richness(rare_mydata_sub, x="sampletype1", measures=c("Observed", "Chao1","Shannon"))+geom_boxplot()+xlab("Sample type")+ylab("Diversity")
+```
+Significance testing on alpha diversity results
+```{r}
+alpha_estimates<-estimate_richness(rare_mydata_sub, split = TRUE, measures = c("Observed", "Chao1", "Shannon"))
+#Sort samples in alpha_estimates by sample name
+alpha_estimates_sorted<-alpha_estimates[order(rownames(alpha_estimates)),]
+#sort samples in sample_data(rare_mydata_sub) by sample name
+sorted_sampledata<-sample_data(rare_mydata_sub)[order(rownames(sample_data(rare_mydata_sub))),]
+#Create a vector of which group each sample belongs to from the sampletype1 column and add to alpha estimates file
+group<-sorted_sampledata$sampletype1
+alpha_estimates_sorted<-cbind(alpha_estimates_sorted, group)
+rm(group)
+#Sort sorted_alpha_estimates by group
+alpha_estimates_sorted<-alpha_estimates_sorted[order(alpha_estimates_sorted$group),]
+#Get median, min and max "Observed" values for the three groups under "group"
+library(plyr)
+median_otus<-ddply(alpha_estimates_sorted, .(group), summarize, median_otus=median(Observed), max=max(Observed), min=min(Observed))
+median_otus
+#Code from Steve Bush to assess statistical difference in diversity between groups.
+library(MASS)
+fullmodel<-glm.nb(Observed ~factor(group),data=alpha_estimates_sorted)
+reducedmodel<- glm.nb (Observed ~1,data=alpha_estimates_sorted)
+library(lmtest)
+lrtest(fullmodel, reducedmodel)
+#Wilcox rank sum test
+wilcox.test(Observed ~ group, alpha_estimates_sorted, subset=group%in%c("control_skin", "diabetic_skin"))
+wilcox.test(Observed ~ group, alpha_estimates_sorted, subset=group%in%c("wound", "diabetic_skin"))
+wilcox.test(Observed ~ group, alpha_estimates_sorted, subset=group%in%c("wound", "control_skin"))
+#Now stats for Chao1 and Shannon
+fullmodel<-glm.nb(Chao1 ~factor(group),data=alpha_estimates_sorted)
+reducedmodel<- glm.nb (Chao1 ~1,data=alpha_estimates_sorted)
+lrtest(fullmodel, reducedmodel)
+wilcox.test(Chao1 ~ group, alpha_estimates_sorted, subset=group%in%c("control_skin", "diabetic_skin"))
+wilcox.test(Chao1 ~ group, alpha_estimates_sorted, subset=group%in%c("wound", "diabetic_skin"))
+wilcox.test(Chao1 ~ group, alpha_estimates_sorted, subset=group%in%c("wound", "control_skin"))
+fullmodel<-glm.nb(Shannon ~factor(group),data=alpha_estimates_sorted)
+reducedmodel<- glm.nb (Shannon ~1,data=alpha_estimates_sorted)
+lrtest(fullmodel, reducedmodel)
+wilcox.test(Shannon ~ group, alpha_estimates_sorted, subset=group%in%c("control_skin", "diabetic_skin"))
+wilcox.test(Shannon ~ group, alpha_estimates_sorted, subset=group%in%c("control_skin", "diabetic_skin"), correct=FALSE)
+wilcox.test(Shannon ~ group, alpha_estimates_sorted, subset=group%in%c("wound", "diabetic_skin"))
+wilcox.test(Shannon ~ group, alpha_estimates_sorted, subset=group%in%c("wound", "control_skin"))
+```
+Plots of top 20 OTUs by average abundance per group.
+```{r}
+#Using apply to get average abundances of OTUs per group.  First create vectors of names of each group of samples
+control_skin_samples<-rownames(sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"sampletype1"]=="control_skin"])
+diabetic_skin_samples<-rownames(sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"sampletype1"]=="diabetic_skin"])
+wound_swab_samples<-rownames(sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"sampletype2"]=="wound_swab"])
+wound_deb_samples<-rownames(sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"sampletype2"]=="wound_deb"])
+#Now apply the mean function only to columns of the OTU table that correspond to a sample from each of the vectors of groups sample names. i.e. gets mean abundance for each OTU for each of the 4 sample groups defined above.
+mean_abund_control_skin_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,control_skin_samples],1, FUN=mean))
+stdev_abund_control_skin_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,control_skin_samples],1, FUN=sd))
+mean_abund_diabetic_skin_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,diabetic_skin_samples],1, FUN=mean))
+stdev_abund_diabetic_skin_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,diabetic_skin_samples],1, FUN=sd))
+mean_abund_wound_swab_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,wound_swab_samples],1, FUN=mean))
+mean_abund_wound_deb_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,wound_deb_samples],1, FUN=mean))
+#Now bind those results into a new table and define row (OTU) and column (sample) names.
+average_abund_all<-as.matrix(cbind(mean_abund_control_skin_otus,mean_abund_diabetic_skin_otus,mean_abund_wound_swab_otus,mean_abund_wound_deb_otus))
+rownames(average_abund_all)<-rownames(otu_table(rare_mydata_sub))
+colnames(average_abund_all)<-c("control skin","diabetic skin","wound swabs","wound debridement")
+#Create table of just skin otus with average abundace and standard deviation for control and diabetic groups
+average_abund_sd_skin<-as.matrix(cbind(mean_abund_control_skin_otus,stdev_abund_control_skin_otus, mean_abund_diabetic_skin_otus,stdev_abund_diabetic_skin_otus))
+rownames(average_abund_sd_skin)<-rownames(otu_table(rare_mydata_sub))
+colnames(average_abund_sd_skin)<-c("control skin average","control skin sd","diabetic skin average","diabetic skin sd")
+#Sort abund_all table by the 20 most abundant accross all sample types, after converting counts to propotions.
+average_abund_all<-((average_abund_all/30000)*100)
+average_abund_all<-average_abund_all[order(-rowSums(average_abund_all)),]
+top20<-average_abund_all[1:20,]
+top20<-data.frame(top20)
+top20<-cbind(top20,tax_table(rare_mydata_sub)[rownames(top20),])
+top20<-top20[,c(1,2,3,4,9,10,11)]
+top20$OTU<-paste(top20$Family,top20$Genus, top20$Species, rownames(top20))
+top20<-top20[,c(1, 2, 3, 4,8)]
+#Now melt data to the right format for ggplot
+library(reshape)
+top20<-melt(top20)
+#Now plot a stacked barplot
+ggplot(top20, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_hue(l=50) + labs(title="Top 20 OTUs across all sample types", x="", y="Relative abundance (%)") + theme(legend.title=element_text(size=10))
+#Still need to figure our best colour scale and labels - will do this later.
+```
+Plots of top 10 OTUs by average abundance per group in skin only.
+```{r}
+#Use vectors of names of each group of samples created above and apply the mean function only to columns of the OTU table that correspond to a sample from each of the vectors of groups sample names. i.e. get mean abundance for each OTU for each of the 2 sample groups.
+mean_abund_control_skin_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,control_skin_samples],1, FUN=mean))
+mean_abund_diabetic_skin_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,diabetic_skin_samples],1, FUN=mean))
+#Now bind those results into a new table and define row (OTU) and column (sample) names.
+average_abund_skin<-as.matrix(cbind(mean_abund_control_skin_otus,mean_abund_diabetic_skin_otus))
+rownames(average_abund_skin)<-rownames(otu_table(rare_mydata_sub))
+colnames(average_abund_skin)<-c("control skin","diabetic skin")
+#Now sort table by the 20 most abundant across all sample types, after converting counts to propotions.
+average_abund_skin<-((average_abund_skin/30000)*100)
+average_abund_skin<-average_abund_skin[order(-rowSums(average_abund_skin)),]
+top20skin<-average_abund_skin[1:20,]
+top20skin<-data.frame(top20skin)
+top20skin<-cbind(top20skin,tax_table(rare_mydata_sub)[rownames(top20skin),])
+top20skin<-top20skin[,c(1,2,7,8,9)]
+top20skin$OTU<-paste(top20skin$Family,top20skin$Genus, top20skin$Species, rownames(top20skin))
+top20skin<-top20skin[,c(1, 2,6)]
+#Now melt data to the right format for ggplot
+top20skin<-melt(top20skin)
+#Now plot a stacked barplot
+ggplot(top20skin, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_hue(l=50)+ labs(title="Top 20 OTUs in control and diabetic skin", x="", y="Relative abundance (%)")+ theme(legend.text=element_text(size=8))
+#Repeat for top 10
+top10skin<-average_abund_skin[1:10,]
+top10skin<-data.frame(top10skin)
+top10skin<-cbind(top10skin,tax_table(rare_mydata_sub)[rownames(top10skin),])
+top10skin<-top10skin[,c(1,2,7,8,9)]
+top10skin$OTU<-paste(top10skin$Family,top10skin$Genus, top10skin$Species, rownames(top10skin))
+#Write file for making nice graphics in another program if necessary
+write.table(top10skin, file="r_data/top10skin.txt", sep="\t")
+top10skin<-top10skin[,c(1, 2,6)]
+#Now melt data to the right format for ggplot
+top10skin<-melt(top10skin)
+#Now plot a stacked barplot
+ggplot(top10skin, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+ labs(title="Top 10 OTUs in control and diabetic skin", x="", y="Relative abundance (%)")+ theme(legend.text=element_text(size=10))+scale_fill_brewer(palette="Paired")
+```
+Wound taxa plots top 10 or 20 overall, and by patient over time
+```{r}
+#Create vector of sample names for wounds and wond debridement
+diabetic_woundswab_samples<-rownames(sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"sampletype2"]=="wound_swab"])
+diabetic_wounddeb_samples<-rownames(sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"sampletype2"]=="wound_deb"])
+#Now apply the mean function only to columns of the OTU table that correspond to a sample from each of the vectors of groups sample names. i.e. get mean abundance for each OTU for each of the sample groups defined above.
+mean_abund_woundswab_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,diabetic_woundswab_samples],1, FUN=mean))
+mean_abund_wounddeb_otus<-as.matrix(apply(otu_table(rare_mydata_sub)[,diabetic_wounddeb_samples],1, FUN=mean))
+#Now bind those results into a new table and define row (OTU) and column (sample) names.
+average_abund_wounds<-as.matrix(cbind(mean_abund_woundswab_otus,mean_abund_wounddeb_otus))
+rownames(average_abund_wounds)<-rownames(otu_table(rare_mydata_sub))
+colnames(average_abund_wounds)<-c("wound swabs","wound debridment")
+#Now sort table by the 20 most abundant across all sample types, after converting counts to propotions.
+average_abund_wounds<-((average_abund_wounds/30000)*100)
+average_abund_wounds<-average_abund_wounds[order(-rowSums(average_abund_wounds)),]
+top20wounds<-average_abund_wounds[1:20,]
+top20wounds<-data.frame(top20wounds)
+top20wounds<-cbind(top20wounds,tax_table(rare_mydata_sub)[rownames(top20wounds),])
+top20wounds$OTU<-paste(top20wounds$Family, top20wounds$Genus,rownames(top20wounds))
+top20wounds_melt<-top20wounds[,c(1,2,10)]
+#Now melt data to the right format for ggplot
+top20wounds_melt<-melt(top20wounds_melt)
+#Now plot a stacked barplot
+ggplot(top20wounds_melt, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_hue(l=50)+ggtitle("Top 20 OTUs in Wounds")+labs(x = "", y="Relative abundance (%)")+ theme(legend.text = element_text(size = 8, ))
+#Now the top 10
+top10wounds<-average_abund_wounds[1:10,]
+top10wounds<-data.frame(top10wounds)
+top10wounds<-cbind(top10wounds,tax_table(rare_mydata_sub)[rownames(top10wounds),])
+top10wounds$OTU<-paste(top10wounds$Family, top10wounds$Genus,rownames(top10wounds))
+top10wounds_melt<-top10wounds[,c(1,2,10)]
+#Now melt data to the right format for ggplot
+top10wounds_melt<-melt(top10wounds_melt)
+#Now plot a stacked barplot
+ggplot(top10wounds_melt, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+ggtitle("Top 10 OTUs in Wounds")+labs(x = "", y="Relative abundance (%)")+ theme(legend.text = element_text(size = 8, ))+ scale_fill_brewer(palette="Paired")
+```
+
+Now per patient
+```{r}
+#create vectors of sample names for wound swabs for each patient
+P1sd<-sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"subject"]=="P1"]
+P1_wounds<-rownames(P1sd)[P1sd[,"sampletype2"]=="wound_swab"]
+P2sd<-sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"subject"]=="P2"]
+P2_wounds<-rownames(P2sd)[P2sd[,"sampletype2"]=="wound_swab"]
+P5sd<-sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"subject"]=="P5"]
+P5_wounds<-rownames(P5sd)[P5sd[,"sampletype2"]=="wound_swab"]
+P6sd<-sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"subject"]=="P6"]
+P6_wounds<-rownames(P6sd)[P6sd[,"sampletype2"]=="wound_swab"]
+P7sd<-sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"subject"]=="P7"]
+P7_wounds<-rownames(P7sd)[P7sd[,"sampletype2"]=="wound_swab"]
+P8sd<-sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"subject"]=="P8"]
+P8_wounds<-rownames(P8sd)[P8sd[,"sampletype2"]=="wound_swab"]
+P9sd<-sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"subject"]=="P9"]
+P9_wounds<-rownames(P9sd)[P9sd[,"sampletype2"]=="wound_swab"]
+P10sd<-sample_data(rare_mydata_sub)[sample_data(rare_mydata_sub)[,"subject"]=="P10"]
+P10_wounds<-rownames(P10sd)[P10sd[,"sampletype2"]=="wound_swab"]
+#make otu table only for P1 wound swabs, and sort by rowsums.  Then convert counts to %, order columns by name, add taxonomy, bind to a single OTU columns with the numerical OTU identifier, subset to top ten and plot over time using ggplot.
+P1_wounds_abund<-data.frame(otu_table(rare_mydata_sub)[,P1_wounds])
+P1_wounds_abund<-P1_wounds_abund[order(-rowSums(P1_wounds_abund)),]
+P1_wounds_abund<-(P1_wounds_abund/30000)*100
+P1_wounds_abund<-P1_wounds_abund[,order(names(P1_wounds_abund))]
+P1_wounds_abund<-cbind(P1_wounds_abund,tax_table(rare_mydata_sub)[rownames(P1_wounds_abund),c("Family","Genus","Species")])
+P1_wounds_abund$OTU<-paste(P1_wounds_abund$Family,P1_wounds_abund$Genus,P1_wounds_abund$Species, rownames(P1_wounds_abund))
+P1_wounds_abund<-P1_wounds_abund[,c(1,2,3,4,5,6,10)]
+P1_wounds_top10<-P1_wounds_abund[1:10,]
+colnames(P1_wounds_top10)<-c("0","1","2","3","4","5","OTU")
+P1_wounds_top10<-melt(P1_wounds_top10)
+#Now plot a stacked barplot
+P1_wound_plot<-ggplot(P1_wounds_top10, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_brewer(palette="Paired")+ggtitle("Patient 1")+ labs(x = "Time point", y="Relative abundance (%)")
+P1_wound_plot
+#Still need to figure our best colour scale and labels - will do this later.
+#Repeat for patient 2
+P2_wounds_abund<-data.frame(otu_table(rare_mydata_sub)[,P2_wounds])
+P2_wounds_abund<-P2_wounds_abund[order(-rowSums(P2_wounds_abund)),]
+P2_wounds_abund<-(P2_wounds_abund/30000)*100
+P2_wounds_abund<-P2_wounds_abund[,order(names(P2_wounds_abund))]
+P2_wounds_abund<-cbind(P2_wounds_abund,tax_table(rare_mydata_sub)[rownames(P2_wounds_abund),c("Family","Genus","Species")])
+P2_wounds_abund$OTU<-paste(P2_wounds_abund$Family,P2_wounds_abund$Genus,P2_wounds_abund$Species, rownames(P2_wounds_abund))
+P2_wounds_abund<-P2_wounds_abund[,c(1,2,3,7)]
+P2_wounds_top10<-P2_wounds_abund[1:10,]
+colnames(P2_wounds_top10)<-c("0","3","5","OTU")
+P2_wounds_top10<-melt(P2_wounds_top10)
+#Now plot a stacked barplot
+P2_wound_plot<-ggplot(P2_wounds_top10, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_brewer(palette="Paired")+ggtitle("Patient 2")+ labs(x = "Time point", y="Relative abundance (%)")
+P2_wound_plot
+#Now repeat for P5
+P5_wounds_abund<-data.frame(otu_table(rare_mydata_sub)[,P5_wounds])
+P5_wounds_abund<-P5_wounds_abund[order(-rowSums(P5_wounds_abund)),]
+P5_wounds_abund<-(P5_wounds_abund/30000)*100
+P5_wounds_abund<-P5_wounds_abund[,order(names(P5_wounds_abund))]
+P5_wounds_abund<-cbind(P5_wounds_abund,tax_table(rare_mydata_sub)[rownames(P5_wounds_abund),c("Family","Genus","Species")])
+P5_wounds_abund$OTU<-paste(P5_wounds_abund$Family,P5_wounds_abund$Genus,P5_wounds_abund$Species, rownames(P5_wounds_abund))
+P5_wounds_abund<-P5_wounds_abund[,c(1,2,3,4,5,6,10)]
+P5_wounds_top10<-P5_wounds_abund[1:10,]
+colnames(P5_wounds_top10)<-c("0","1","2","3","4","5","OTU")
+P5_wounds_top10<-melt(P5_wounds_top10)
+#Now plot a stacked barplot
+P5_wound_plot<-ggplot(P5_wounds_top10, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_brewer(palette="Paired")+ggtitle("Patient 5")+ labs(x = "Time point", y="Relative abundance (%)")
+P5_wound_plot
+#Repeat for P6
+P6_wounds_abund<-data.frame(otu_table(rare_mydata_sub)[,P6_wounds])
+P6_wounds_abund<-P6_wounds_abund[order(-rowSums(P6_wounds_abund)),]
+P6_wounds_abund<-(P6_wounds_abund/30000)*100
+P6_wounds_abund<-P6_wounds_abund[,order(names(P6_wounds_abund))]
+P6_wounds_abund<-cbind(P6_wounds_abund,tax_table(rare_mydata_sub)[rownames(P6_wounds_abund),c("Family","Genus","Species")])
+P6_wounds_abund$OTU<-paste(P6_wounds_abund$Family,P6_wounds_abund$Genus,P6_wounds_abund$Species, rownames(P6_wounds_abund))
+P6_wounds_abund<-P6_wounds_abund[,c(1,2,3,4,5,9)]
+P6_wounds_top10<-P6_wounds_abund[1:10,]
+colnames(P6_wounds_top10)<-c("0","1","2","3","4","OTU")
+P6_wounds_top10<-melt(P6_wounds_top10)
+#Now plot a stacked barplot
+P6_wound_plot<-ggplot(P6_wounds_top10, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_brewer(palette="Paired")+ggtitle("Patient 6")+ labs(x = "Time point", y="Relative abundance (%)")
+P6_wound_plot
+#Repeat for P7
+P7_wounds_abund<-data.frame(otu_table(rare_mydata_sub)[,P7_wounds])
+P7_wounds_abund<-P7_wounds_abund[order(-rowSums(P7_wounds_abund)),]
+P7_wounds_abund<-(P7_wounds_abund/30000)*100
+P7_wounds_abund<-P7_wounds_abund[,order(names(P7_wounds_abund))]
+P7_wounds_abund<-cbind(P7_wounds_abund,tax_table(rare_mydata_sub)[rownames(P7_wounds_abund),c("Family","Genus","Species")])
+P7_wounds_abund$OTU<-paste(P7_wounds_abund$Family,P7_wounds_abund$Genus,P7_wounds_abund$Species, rownames(P7_wounds_abund))
+P7_wounds_abund<-P7_wounds_abund[,c(1,2,3,4,8)]
+P7_wounds_top10<-P7_wounds_abund[1:10,]
+colnames(P7_wounds_top10)<-c("0","1","2","3","OTU")
+P7_wounds_top10<-melt(P7_wounds_top10)
+#Now plot a stacked barplot
+P7_wound_plot<-ggplot(P7_wounds_top10, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_brewer(palette="Paired")+ggtitle("Patient 7")+ labs(x = "Time point", y="Relative abundance (%)")
+P7_wound_plot
+#Repeat for P8
+P8_wounds_abund<-data.frame(otu_table(rare_mydata_sub)[,P8_wounds])
+P8_wounds_abund<-P8_wounds_abund[order(-rowSums(P8_wounds_abund)),]
+P8_wounds_abund<-(P8_wounds_abund/30000)*100
+P8_wounds_abund<-P8_wounds_abund[,order(names(P8_wounds_abund))]
+P8_wounds_abund<-cbind(P8_wounds_abund,tax_table(rare_mydata_sub)[rownames(P8_wounds_abund),c("Family","Genus","Species")])
+P8_wounds_abund$OTU<-paste(P8_wounds_abund$Family,P8_wounds_abund$Genus,P8_wounds_abund$Species, rownames(P8_wounds_abund))
+P8_wounds_abund<-P8_wounds_abund[,c(1,2,3,4,5,9)]
+P8_wounds_top10<-P8_wounds_abund[1:10,]
+colnames(P8_wounds_top10)<-c("0","1","2","3","5","OTU")
+P8_wounds_top10<-melt(P8_wounds_top10)
+#Now plot a stacked barplot
+P8_wound_plot<-ggplot(P8_wounds_top10, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_brewer(palette="Paired")+ labs(x = "Time point", y="Relative abundance (%)")+ggtitle("Patient 8")
+P8_wound_plot
+#Repeat for P9
+P9_wounds_abund<-data.frame(otu_table(rare_mydata_sub)[,P9_wounds])
+P9_wounds_abund<-P9_wounds_abund[order(-rowSums(P9_wounds_abund)),]
+P9_wounds_abund<-(P9_wounds_abund/30000)*100
+P9_wounds_abund<-P9_wounds_abund[,order(names(P9_wounds_abund))]
+P9_wounds_abund<-cbind(P9_wounds_abund,tax_table(rare_mydata_sub)[rownames(P9_wounds_abund),c("Family","Genus","Species")])
+P9_wounds_abund$OTU<-paste(P9_wounds_abund$Family,P9_wounds_abund$Genus,P9_wounds_abund$Species, rownames(P9_wounds_abund))
+P9_wounds_abund<-P9_wounds_abund[,c(1,2,3,4,5,9)]
+P9_wounds_top10<-P9_wounds_abund[1:10,]
+colnames(P9_wounds_top10)<-c("0","1","2","4","5","OTU")
+P9_wounds_top10<-melt(P9_wounds_top10)
+#Now plot a stacked barplot
+P9_wound_plot<-ggplot(P9_wounds_top10, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_brewer(palette="Paired")+ labs(x = "Time point", y="Relative abundance (%)")+ggtitle("Patient 9")
+P9_wound_plot
+#Repeat for P10
+P10_wounds_abund<-data.frame(otu_table(rare_mydata_sub)[,P10_wounds])
+P10_wounds_abund<-P10_wounds_abund[order(-rowSums(P10_wounds_abund)),]
+P10_wounds_abund<-(P10_wounds_abund/30000)*100
+P10_wounds_abund<-P10_wounds_abund[,order(names(P10_wounds_abund))]
+P10_wounds_abund<-cbind(P10_wounds_abund,tax_table(rare_mydata_sub)[rownames(P10_wounds_abund),c("Family","Genus","Species")])
+P10_wounds_abund$OTU<-paste(P10_wounds_abund$Family,P10_wounds_abund$Genus,P10_wounds_abund$Species, rownames(P10_wounds_abund))
+P10_wounds_abund<-P10_wounds_abund[,c(1,2,3,4,5,9)]
+P10_wounds_top10<-P10_wounds_abund[1:10,]
+colnames(P10_wounds_top10)<-c("0","1","2","3","4","OTU")
+P10_wounds_top10<-melt(P10_wounds_top10)
+#Now plot a stacked barplot
+P10_wound_plot<-ggplot(P10_wounds_top10, aes(x=variable, y=value, fill=OTU))+geom_bar(stat="identity")+scale_fill_brewer(palette="Paired")+ labs(x = "Time point", y="Relative abundance (%)")+ggtitle("Patient 10")
+P10_wound_plot
+```
+Weighted unifrac, ##Jaccard and ##Horn-Morista distances with PCoA ordination and plotting on rarefied otu table
+```{r}
+diaball_dist<-phyloseq::distance(rare_mydata_sub, method="unifrac", type="samples", weighted=TRUE)
+diaball_ord<-ordinate(rare_mydata_sub, method="PCoA", distance="diaball_dist", type="samples")
+```
+```{r fig.width=10, fig.height=4}
+plot_ordination(rare_mydata_sub, diaball_ord, type="samples", color="sampletype1", title="PCoA of weighted unifrac distances between wounds, diabetic skin,\nand non-diabetic skin\nrarefied OTU table")
+```
+#```{r}
+#diaball_dist_jc<-phyloseq::distance(rare_mydata_sub, method="jaccard", type="samples")
+#diaball_ord_jc<-ordinate(rare_mydata_sub, method="PCoA", distance="diaball_dist_jc", type="samples")
+```
+#```{r fig.width=10, fig.height=4}
+#plot_ordination(rare_mydata_sub, diaball_ord_jc, type="samples", color="sampletype1", title="PCoA of Jaccard distances between wounds, diabetic skin,\nand non-diabetic skin\nrarefied OTU table")
+Subset to skin only and repeat
+```{r}
+rare_skin<-subset_samples(rare_mydata_sub, sampletype1%in%c("control_skin","diabetic_skin"))
+rare_skin_dist<-phyloseq::distance(rare_skin, method="unifrac", type="samples", weighted=TRUE)
+rare_skin_ord<-ordinate(rare_skin, method="PCoA", distance="rare_skin_dist", type="samples")
+```
+```{r fig.width=10, fig.height=4}
+plot_ordination(rare_skin, rare_skin_ord, type="samples", color="sampletype1", title="PCoA of weighted unifrac distances between diabetic skin,\nand non-diabetic skin\n rarefied OTU table")
+```
+#```{r}
+#rare_skin_dist_jc<-phyloseq::distance(rare_skin, method="jaccard", type="samples")
+#rare_skin_ord_jc<-ordinate(rare_skin, method="PCoA", distance="rare_skin_dist_jc", type="samples")
+#```
+#```{r fig.width=10, fig.height=4}
+#plot_ordination(rare_skin, rare_skin_ord_jc, type="samples", color="sampletype1", title="PCoA of Jaccard distances between diabetic skin,\nand non-diabetic skin\n rarefied OTU table")
+#```
+#Try Horn-Morista
+#```{r}
+#diaball_dist_hm <-phyloseq::distance(rare_mydata_sub, method="horn", type="samples")
+#diaball_ord_hm <- ordinate(rare_mydata_sub, method="PCoA", distance="diaball_dist_hm", type="samples")
+#```
+#```{r fig.width=10, fig.height=4}
+#plot_ordination(rare_mydata_sub, diaball_ord_hm, type="samples", color="sampletype1", title="PCoA of Horn-Morista distances between wounds, diabetic skin,\nand non-diabetic skin\n rarefied OTU table")
+#```
+#```{r}
+#rare_skin_dist_hm<-phyloseq::distance(rare_skin, method="horn", type="samples")
+#rare_skin_ord_hm<-ordinate(rare_skin, method="PCoA", distance="rare_skin_dis#t_hm", type="samples")
+#```
+#```{r fig.width=10, fig.height=4}
+#plot_ordination(rare_skin, rare_skin_ord_hm, type="samples", color="sampletype1", title="PCoA of Horn-Morista distances between diabetic skin,\nand non-diabetic skin\n rarefied OTU table")
+#plot_ordination(rare_skin, rare_skin_ord_hm, type="samples", color="subject", shape="sampletype1", title="PCoA of Horn-Morista distances between diabetic skin,\nand non-diabetic skin\n rarefied OTU table")
+#```
+Permanova tests for signficance on rarefied otu distance analysis
+```{r}
+#PERMANOVA-create a file of factors for only the samples in the analysis
+mapping<- sample_data(rare_skin)
+health<- mapping$health
+subject<- mapping$subject
+#PERMANOVA analysis
+library("vegan")
+perm_rare_unifrac<-adonis(rare_skin_dist ~ health/subject, data=as(sample_data(rare_skin),"data.frame"))
+perm_rare_unifrac
+#perm_rare_jaccard<-adonis(rare_skin_dist_jc ~ health/subject, data=as(sample_data(rare_skin),"data.frame"))
+#perm_rare_jaccard
+#perm_rare_hm<-adonis(rare_skin_dist_hm ~ health/subject, data=as(sample_data(rare_skin),"data.frame"))
+#perm_rare_hm
+```
+Variance Stabilizing Transformation
+```{r}
+library("DESeq2")
+diaball_dds <- phyloseq_to_deseq2(mydata_sub, ~1)
+#Filter OTUs present in only one sample 
+#What about otus present in less than 10% of samples?
+diaball_filtered_dds <- diaball_dds[ rowSums(counts(diaball_dds)) > 1, ]
+#estaimte size factors and dispersion in DESeq2 
+diaball_filtered_dds <- estimateSizeFactors(diaball_filtered_dds)
+diaball_filtered_dds <- estimateDispersions(diaball_filtered_dds, fitType = "local")
+#Create new phyloseq object from mydata_sub and populate the otu table with the vst values
+diaball_vst <-mydata_sub
+otu_table(diaball_vst)<- otu_table(getVarianceStabilizedData(diaball_filtered_dds), taxa_are_rows = TRUE)
+#Remove -ive values in matrix, replace with 0
+matrix_vst_otu <- otu_table(diaball_vst, taxa_are_rows=TRUE)
+matrix_vst_otu[matrix_vst_otu<0]=0
+otu_table(diaball_vst)<-otu_table(matrix_vst_otu, taxa_are_rows=TRUE)
+```
+Weighted unifrac and ordination
+```{r}
+diaball_vst_dist<-phyloseq::distance(diaball_vst, method="unifrac", type="samples", weighted=TRUE)
+diaball_vst_ord<-ordinate(diaball_vst, method="PCoA", distance="diaball_vst_dist", type="samples")
+```
+```{r, fig.width=10, fig.height=4}
+plot_ordination(diaball_vst, diaball_vst_ord, type="samples", color="sampletype1", title="PCoA of weighted unifrac distances between wounds, diabetic skin,\nand non-diabetic skin\nvst transformed OTU table")
+```
+```{r}
+#subset to skin only and repeat
+skin_vst<-subset_samples(diaball_vst, sampletype1%in%c("control_skin", "diabetic_skin"))
+skin_vst_dist<-phyloseq::distance(skin_vst, method="unifrac", type="samples", weighted=TRUE)
+skin_vst_ord<-phyloseq::ordinate(skin_vst, method="PCoA", distance="skin_vst_dist")
+```
+```{r fig.width=10, fig.height=4}
+plot_ordination(skin_vst, skin_vst_ord, type="samples", color="sampletype1", title="PCoA of weighted unifrac distances between\ndiabetic skin and non-diabetic skin\nvst transformed OTU table")+theme(legend.title=element_blank())
+Figure4<-plot_ordination(skin_vst, skin_vst_ord, type="samples", color="sampletype1", title="PCoA of weighted unifrac distances between\ndiabetic skin and non-diabetic skin")+theme(legend.title=element_blank())
+####Trying to put 95% confidence interval elipses on plot using instructions from here https://www.biostars.org/p/126454/, but can't get it to work - works on CCA plots but not Unifrac PCoA plots according to the example..
+#Get data from plot
+#skin_vst_ord_data<-(plot_ordination(skin_vst, skin_vst_ord, type="samples", color="sampletype1", title="PCoA of weighted unifrac distances between\ndiabetic skin and non-diabetic skin\nvst transformed OTU table"))$data
+#skin_vst_ord_data
+# add a fake variable to the experiment
+#sample_data(skin_vst)$fake <- 1:nsamples(skin_vst)
+# use the envfit function of vegan
+#ord_ef_skin_vst <- envfit(skin_vst_ord ~ fake,permu=1000,data = as(sample_data(skin_vst),"data.frame"))
+```
+#Use Jaccard and Horn-Morista distances
+#```{r}
+#diaball_vst_dist_jc<-phyloseq::distance(diaball_vst, method="jaccard", type="samples")
+#diaball_vst_ord_jc<-ordinate(diaball_vst, method="PCoA", distance="diaball_vst_dist_jc", type="samples")
+#```
+#```{r fig.width=10, fig.height=4}
+#plot_ordination(diaball_vst, diaball_vst_ord_jc, type="samples", color="sampletype1", title="PCoA of Jaccard distances between wounds, diabetic skin,\nand non-diabetic skin\nvst transformed OTU table")
+#```
+#```{r}
+#repeat on skin only subset
+#skin_vst_dist_jc<-phyloseq::distance(skin_vst, method="jaccard", type="samples")
+#skin_vst_ord_jc<-phyloseq::ordinate(skin_vst, method="PCoA", distance#="skin_vst_dist_jc")
+#```
+#```{r fig.width=10, fig.height=4}
+#plot_ordination(skin_vst, skin_vst_ord_jc, type="samples", color="sampletype1", title="PCoA of Jaccard distances between\ndiabetic skin and non-diabetic skin\nvst transformed OTU table")
+#```
+#```{r}
+#diaball_dist_hm<-phyloseq::distance(diaball_vst, method="horn", type="samples")
+#diaball_ord_hm<-ordinate(diaball_vst, method="PCoA", distance="diaball_dist_hm", type="samples")
+#```{r fig.width=10, fig.height=4}
+#plot_ordination(diaball_vst, diaball_ord_hm, type="samples", color="sampletype1", title="PCoA of Horn-Morista distances between wounds, diabetic skin,\nand non-diabetic skin\nvst transformed OTU table")
+#```
+#```{r}
+#subset to skin only and repeat
+#skin_vst_dist_hm<-phyloseq::distance(skin_vst, method="horn", type="samples")
+#skin_vst_ord_hm<-phyloseq::ordinate(skin_vst, method="PCoA", distance="skin_vst_dist_hm")
+#```
+#```{r fig.width=10, fig.height=4}
+#plot_ordination(skin_vst, skin_vst_ord_hm, type="samples", color="sampletype1", title="PCoA of Horn-Morista distances between\ndiabetic skin and non-diabetic skin\nvst transformed OTU table")
+#```
+Permanova statistics on vst otu table distance calculations
+```{r}
+perm_vst_unifrac<-adonis(skin_vst_dist ~ health/subject, data=as(sample_data(skin_vst),"data.frame"))
+perm_vst_unifrac
+#perm_vst_jc<-adonis(skin_vst_dist_jc ~ health/subject, data=as(sample_data(skin_vst),"data.frame"))
+#perm_vst_jc
+#perm_vst_hm<-adonis(skin_vst_dist_hm ~ health/subject, data=as(sample_data(skin_vst),"data.frame"))
+#perm_vst_hm
+```
+Differential abundance analysis using DESeq2
+This analysis uses raw counts... does not do a vst on the data, but does other data transformation to account for differences in library size and to stabilise variance within groups.
+```{r}
+#Subset raw count data to skin only
+mydata_sub_skin<-subset_samples(mydata_sub, sampletype1%in%c("control_skin","diabetic_skin"))
+#Filter OTUs seen less than 3 times in less than 20% of samples
+mydata_sub_skin_filter<-filter_taxa(mydata_sub_skin, function(x) sum(x > 3) > (0.2*length(x)), TRUE)
+#convert to DESeq2 object and specify experimental design
+skin_diff_dds<-phyloseq_to_deseq2(mydata_sub_skin_filter, ~ health + health:subject2, ignoreRank=TRUE)
+#manually creating the coldata file to manually create the model matrix
+write.csv(sample_data(mydata_sub_skin_filter),file="r_data/coldata.csv")
+coldata <- read.csv("r_data/coldata.csv")
+head(coldata)
+#The specified model creates issues with some columns of the model matrix having only 0.  Creating the model matrix manually and removing the columns with only 0 as specified in the DESeq2 vignette 3.12.2
+m1 <- model.matrix(~ health + subject2:health, coldata)
+colnames(m1)
+#unname(m1)
+m1 <- m1[,-18]
+#unname(m1)
+m1 <- m1[,-15]
+#unname(m1)
+#Make sure log2 abundance differences are calculated compared to the control
+skin_diff_dds$health <- relevel(skin_diff_dds$health, "control")
+#Do diferential abundance analysis on diabetic vs control skin adding the custom matrix generated above using the argument "full".
+skin_diff_dds<-DESeq(skin_diff_dds, full=m1, betaPrior=FALSE)
+#Get results, order by p value, then create a matrix with only sig p value results and merge with the names of the taxa for each OTU.
+res_skin <- results(skin_diff_dds, alpha=0.05, lfcThreshold = 1)
+summary(res_skin, alpha=0.05)
+sig_num<-sum(res_skin$padj < 0.05, na.rm=TRUE)
+resOrdered_skin <- res_skin[order(res_skin$padj),]
+skin_sig <- resOrdered_skin[1:sig_num,]
+df_skin_sig<-data.frame(skin_sig)
+res_Ordered_skin_rownames <- row.names(skin_sig)
+skin_res_names <- tax_table(mydata_sub_skin)[res_Ordered_skin_rownames,]
+skin_diff_merge <-merge(skin_res_names, skin_sig, by="row.names")
+skin_diff_merge[1:10,]
+skin_diff_merge<-skin_diff_merge[order(skin_diff_merge$padj),]
+skin_diff_merge[1:10,]
+#Make the column Row.Names the actual row names
+row.names(skin_diff_merge)<- skin_diff_merge[,1]
+skin_diff_merge[,1]<-NULL
+#Order sig results by log2FoldChange
+skin_diff_merge_fco <- skin_diff_merge[order(-skin_diff_merge$log2FoldChange),]
+skin_diff_merge_fco[1:10,]
+```
+Plot diff abund OTU counts for top 5 log2FC
+```{r}
+#make health a factor for plotting
+health<- mapping$health
+log2FC_1<-plotCounts(skin_diff_dds, gene=row.names(skin_diff_merge_fco)[1], intgroup=c("health","subject2"), returnData=TRUE)
+#alternative ggplot way of plotting the data is commented out below
+#log2FC_1$subject2health <- interaction(log2FC_1$subject2, log2FC_1$health)
+#ggplot(aes(y = count, x = subject2health), data = log2FC_1) + geom_boxplot() #+ scale_y_log10()
+boxplot(log2FC_1$count ~ log2FC_1$subject2*log2FC_1$health, log="y", las=2, main=c(row.names(skin_diff_merge_fco)[1]," log2fc=",skin_diff_merge_fco$log2FoldChange[1]))
+log2FC_2<-plotCounts(skin_diff_dds, gene=row.names(skin_diff_merge_fco)[2], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(log2FC_2$count ~ log2FC_2$subject2*log2FC_2$health, log="y", las=2, main=c(row.names(skin_diff_merge_fco)[2]," log2fc=",skin_diff_merge_fco$log2FoldChange[2]))
+log2FC_3<-plotCounts(skin_diff_dds, gene=row.names(skin_diff_merge_fco)[3], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(log2FC_3$count ~ log2FC_3$subject2*log2FC_3$health, log="y", las=2, main=c(row.names(skin_diff_merge_fco)[3]," log2fc=",skin_diff_merge_fco$log2FoldChange[3]))
+log2FC_4<-plotCounts(skin_diff_dds, gene=row.names(skin_diff_merge_fco)[4], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(log2FC_4$count ~ log2FC_4$subject2*log2FC_4$health, log="y", las=2, main=c(row.names(skin_diff_merge_fco)[4]," log2fc=",skin_diff_merge_fco$log2FoldChange[4]))
+log2FC_5<-plotCounts(skin_diff_dds, gene=row.names(skin_diff_merge_fco)[5], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(log2FC_5$count ~ log2FC_5$subject2*log2FC_5$health, log="y", las=2, main=c(row.names(skin_diff_merge_fco)[5]," log2fc=",skin_diff_merge_fco$log2FoldChange[5]))
+log2FC_115<-plotCounts(skin_diff_dds, gene=row.names(skin_diff_merge_fco)[115], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(log2FC_115$count ~ log2FC_115$subject2*log2FC_115$health, log="y", las=2, main=c(row.names(skin_diff_merge_fco)[115]," log2fc=",skin_diff_merge_fco$log2FoldChange[115]))
+
+```
+Plot counts for top 5 by p value
+```{r}
+resOrdered_skin <- res_skin[order(res_skin$padj),]
+resOrdered_skin[1:10,]
+padj_1<-plotCounts(skin_diff_dds, gene=row.names(resOrdered_skin)[1], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(padj_1$count ~ padj_1$subject2*padj_1$health, log="y", las=2, main=c(row.names(resOrdered_skin)[1]," padj= ", resOrdered_skin$padj[1]))
+padj_2<-plotCounts(skin_diff_dds, gene=row.names(resOrdered_skin)[2], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(padj_2$count ~ padj_2$subject2*padj_2$health, log="y", las=2, main=c(row.names(resOrdered_skin)[2]," padj= ", resOrdered_skin$padj[2]))
+padj_3<-plotCounts(skin_diff_dds, gene=row.names(resOrdered_skin)[3], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(padj_3$count ~ padj_3$subject2*padj_3$health, log="y", las=2, main=c(row.names(resOrdered_skin)[3]," padj= ", resOrdered_skin$padj[3]))
+padj_4<-plotCounts(skin_diff_dds, gene=row.names(resOrdered_skin)[4], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(padj_4$count ~ padj_4$subject2*padj_4$health, log="y", las=2, main=c(row.names(resOrdered_skin)[4]," padj= ", resOrdered_skin$padj[4]))
+padj_5<-plotCounts(skin_diff_dds, gene=row.names(resOrdered_skin)[5], intgroup=c("health","subject2"), returnData=TRUE)
+boxplot(padj_5$count ~ padj_5$subject2*padj_5$health, log="y", las=2, main=c(row.names(resOrdered_skin)[5]," padj= ", resOrdered_skin$padj[5]))
+#Get relative abundances for OTUs per subject(?) and group for the sig diff OTUs
+merge_skin<-merge_samples(mydata_sub_skin, "health")
+#transform sample counts to %
+mydata_sub_skin_relab<-transform_sample_counts(mydata_sub_skin, function(x) 100 * x/sum(x))
+#Get vector of OTU names with p<0.05 in diff abundance analysis
+OTUnames<-row.names(skin_sig)
+#Get average abundance of each OTU across all skin samples
+allsums<-(taxa_sums(mydata_sub_skin_relab)[OTUnames])
+averagesums<-(taxa_sums(mydata_sub_skin_relab)[OTUnames])/nsamples(mydata_sub_skin)
+allsums
+averagesums
+fivenum(allsums)
+fivenum(averagesums)
+#Now how to bind the average sums information to the table of OTUs with p<0.05 above?  Then I will know the average abundance (overall, not per group)
+#Then to put the random forest analysis here:  will try to cut and paste from Sunaina's script and run it.  
+
+#Make a table comparing high GINI index organisms and diff abund OTUs found above with DESeq2.
+#Then done with this section of the analysis!
+#create vectors with names of control samples and diabetic samples for skin
+control_skin_samples<-rownames(sample_data(mydata_sub_skin)[sample_data(mydata_sub_skin)[,"health"]=="control"])
+diabetic_skin_samples<-rownames(sample_data(mydata_sub_skin)[sample_data(mydata_sub_skin)[,"health"]=="diabetes"])
+#apply the mean & stdev functions to sig diff OTUs only, and for only control or skin samples
+control_sig_otus_means<-as.matrix(apply(otu_table(mydata_sub_skin_relab)[OTUnames,control_skin_samples],1,FUN=mean))
+control_sig_otus_sd<-as.matrix(apply(otu_table(mydata_sub_skin_relab)[OTUnames,control_skin_samples],1,FUN=sd))
+diabetic_sig_otus_means<-as.matrix(apply(otu_table(mydata_sub_skin_relab)[OTUnames,diabetic_skin_samples],1,FUN=mean))
+diabetic_sig_otus_sd<-as.matrix(apply(otu_table(mydata_sub_skin_relab)[OTUnames,diabetic_skin_samples],1,FUN=sd))
+#Create a table of sig dif OTU names, taxa, adjp values, and average relative abundance for both eeach of control and diabetic skin groups.
+#First make sure sig otu means values are in the same order as the results of sig dif test
+control_sig_otus_means<-as.matrix(control_sig_otus_means[(rownames(skin_diff_merge)),])
+control_sig_otus_sd<-as.matrix(control_sig_otus_sd[(rownames(skin_diff_merge)),])
+diabetic_sig_otus_means<-as.matrix(diabetic_sig_otus_means[(rownames(skin_diff_merge)),])
+diabetic_sig_otus_sd<-as.matrix(diabetic_sig_otus_sd[(rownames(skin_diff_merge)),])
+#Now bind average abundances and sd to the results table
+sig_diff_otus_results<-cbind(skin_diff_merge,control_sig_otus_means,control_sig_otus_sd, diabetic_sig_otus_means, diabetic_sig_otus_sd)
+sig_diff_otus_results[order(-sig_diff_otus_results$control_sig_otus_means),]
+```
+Plots of Relative abundance of OTUs of interest per subject
+```{r}
+OTU_13<-data.frame(otu_table(rare_skin)["OTU_13",])
+OTU_13<-t(OTU_13)
+OTU_13<-OTU_13[order(rownames(OTU_13)),,drop=FALSE]
+subject<-sample_data(rare_skin)[order(rownames(sample_data(rare_skin))),"subject"]
+OTU_13<-cbind(OTU_13,subject)
+OTU_13$"OTU_13"<-(OTU_13$"OTU_13"/30000)*100
+ggplot(OTU_13, aes(x=subject, y=OTU_13)) + 
+  geom_boxplot()+ylim(0,5)+labs(x = "Subject", y="Relative abundance (%)")+
+  ggtitle("Kocuria palustris relative abundance by subject")
+OTU_1002005<-data.frame(otu_table(rare_skin)["1002005",])
+OTU_1002005<-t(OTU_1002005)
+OTU_1002005<-OTU_1002005[order(rownames(OTU_1002005)),,drop=FALSE]
+subject<-sample_data(rare_skin)[order(rownames(sample_data(rare_skin))),"subject"]
+OTU_1002005<-cbind(OTU_1002005,subject)
+OTU_1002005$"1002005"<-(OTU_1002005$"1002005"/30000)*100
+ggplot(OTU_1002005, aes(x=subject, y=OTU_1002005$"1002005")) + 
+  geom_boxplot()+ylim(0,5)+labs(x = "Subject", y="Relative abundance (%)")+
+  ggtitle("Kocuria palustris relative abundance by subject")
+OTU_2855257<-data.frame(otu_table(rare_skin)["2855257",])
+OTU_2855257<-t(OTU_2855257)
+OTU_2855257<-OTU_2855257[order(rownames(OTU_2855257)),,drop=FALSE]
+OTU_2855257<-cbind(OTU_2855257,subject)
+OTU_2855257$"2855257"<-(OTU_2855257$"2855257"/30000)*100
+ggplot(OTU_2855257, aes(x=subject, y=OTU_2855257$"2855257")) + 
+  geom_boxplot()+ylim(0,0.25)+labs(x = "Subject", y="Relative abundance (%)")+ggtitle("Modestobacter relative abundance by subject")
+OTU_205559<-data.frame(otu_table(rare_skin)["205559",])
+OTU_205559<-t(OTU_205559)
+OTU_205559<-OTU_205559[order(rownames(OTU_205559)),,drop=FALSE]
+OTU_205559<-cbind(OTU_205559,subject)
+OTU_205559$"205559"<-(OTU_205559$"205559"/30000)*100
+ggplot(OTU_205559, aes(x=subject, y=OTU_205559$"205559")) + 
+  geom_boxplot()+ylim(0,0.055)+labs(x = "Subject", y="Relative abundance (%)")+ggtitle("Microbacteriaceae relative abundance by subject")
+#Highest by GINI index
+OTU_16101<-data.frame(otu_table(rare_skin)["16101",])
+OTU_16101<-t(OTU_16101)
+OTU_16101<-OTU_16101[order(rownames(OTU_16101)),,drop=FALSE]
+OTU_16101<-cbind(OTU_16101,subject)
+OTU_16101$"16101"<-(OTU_16101$"16101"/30000)*100
+ggplot(OTU_16101, aes(x=subject, y=OTU_16101$"16101")) + 
+  geom_boxplot()+ylim(0,0.15)+labs(x = "Subject", y="Relative abundance (%)")+ggtitle("Caldicellulosiruptor saccharolyticus relative abundance by subject")
+```
+#Now for random forrest - can I paste Sunaina's script here? Let's see....
+##Loading packages and data files in phyloseq
+```{r, echo=FALSE}
+list.of.packages <- c("ggplot2", "Rcpp", "phyloseq","cluster","randomForest","caret","e1071","vegan","scales","grid","doParallel","foreach")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+library(phyloseq)
+library(cluster)
+library(ggplot2)
+library(randomForest)
+library(caret)
+library(e1071)
+library(vegan)
+library("scales")
+library("grid")
+library("doParallel")
+library("foreach")
+#rich_biom = "r_data/otu_table_mc2_w_tax_no_pynast_failures_json.biom"
+#mappingfile = "r_data/mapping_diabetes_all.txt"
+#treefile = "r_data/rooted.tre"
+#mydata = import_biom(rich_biom,treefile)
+#map = import_qiime_sample_data(mappingfile)
+#mergedata = merge_phyloseq(mydata,map)
+#mydataedgeR = import_biom(rich_biom,treefile,parseFunction=parse_taxonomy_greengenes)
+#edgerdata= merge_phyloseq(mydataedgeR,map)
+#tax_table(edgerdata) <- tax_table(edgerdata)[, -8]
+```
+
+###Basic Random Forest
+```{r}
+wh0 = genefilter_sample(rare_skin, filterfun_sample(function(x) x > 0), A = 0.10 * nsamples(rare_skin))
+rare_skin_filter <- prune_taxa(wh0, rare_skin)
+```{r,echo=FALSE}
+t_otutable<-t(otu_table(rare_skin_filter))
+Health <- as.factor(sample_data(rare_skin_filter)$health)
+patientname<-sample_data(rare_skin_filter)$subject
+rf_data<-data.frame(Health,patientname,t_otutable)
+set.seed(250)
+rf_data$Health<-ordered(rf_data$Health,levels=c("diabetes","control"))
+uniqID<-length(unique(rf_data$patientname))
+trainingID<-sample(unique(rf_data$patientname),round(uniqID*0.5),replace=FALSE)
+train<-rf_data[rf_data$patientname %in% trainingID,]
+test<-rf_data[!rf_data$patientname %in% trainingID,]
+train<-train[-2]
+test<-test[-2]
+mtry <- tuneRF(train[-1],train$Health, ntreeTry=200,stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+print(mtry)
+print(best.m)
+rf <-randomForest(Health~.,data=train, mtry=best.m, importance=TRUE,ntree=200)
+predictionsrandomF <- predict(rf,test[-1])
+confusionMatrix(test$Health,predictionsrandomF) 
+```
+
+###Naive Bayes
+```{r,echo=FALSE}
+model <- naiveBayes(Health ~ ., train)
+predBayes<-predict(model, test[-1])
+confusionMatrix(test$Health,predBayes)
+```
+
+###rpart
+```{r,echo=FALSE}
+fitControl = trainControl( method = "cv", number = 10 )
+rparttrain <- train(Health ~ ., data = train, method = "rpart", trControl = fitControl)
+predrpart <- predict(rparttrain, test[-1])
+confusionMatrix(test$Health, predrpart)
+```
+
+###Finding important predictors for RF using Gini importance
+```{r,echo=FALSE}
+predictors<-importance(rf)
+varImpPlot(rf)
+predictors<-data.frame(names=rownames(predictors),predictors)
+predictors<-predictors[order(-predictors[,5]),]
+predictors<-predictors[predictors$MeanDecreaseGini>0.05,]
+otunames<- predictors$names
+otunames<-as.character(otunames)
+otunames<-gsub("^X","",otunames)
+subsetOTU<-prune_taxa(otunames,rare_skin_filter)
+otulist<-data.frame(tax_table(subsetOTU))[otunames,]
+predictors<-cbind(otulist,predictors)
+##Compare results to DESeq 2 sig diff results - merge dataframes?
+rownames(predictors)<-otunames
+compare<-merge(predictors, skin_diff_merge,by=0,all=TRUE)
+```
+Finding average and sd abundance in skin of OTUs of interest
+```{r}
+#Define list of OTUs of interest - from a spreadsheet comparing results from Kruskal and Wallice tst for significant differences, and Gini Index
+sig_otus_interest<-c("274011","818388","2855257","New.CleanUp.ReferenceOTU10998","948180","205559","1002005","1048194","993474","569992","New.ReferenceOTU181","403359","4418684","New.ReferenceOTU153","688714","952388","1093944","369436","552687","1108726","349901","16101")
+abund_sig_otus_interest<-average_abund_sd_skin[sig_otus_interest,]
+tax_sig_otus_interest<-tax_table(rare_mydata_sub)[sig_otus_interest,]
+abund_sig_otus_interest<-as.matrix(cbind(abund_sig_otus_interest,tax_sig_otus_interest))
+abund_sig_otus_interest
+#Now get abundance for GINI indext sig results.
+gini_otus_abund<-average_abund_sd_skin[otunames,]
+tax_gini_otus<-tax_table(rare_mydata_sub)[otunames,]
+gini_otus_abund<-cbind(gini_otus_abund,tax_gini_otus)
